@@ -1,0 +1,1 @@
+from .structfeat import SfFile
