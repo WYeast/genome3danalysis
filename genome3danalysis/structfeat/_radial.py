@@ -1,5 +1,6 @@
 import numpy as np
 import h5py
+from . import _experimental_shape
 
 AVAILABLE_SHAPES = ['sphere', 'ellipsoid', 'experimental']
     
@@ -55,4 +56,9 @@ def run(struct_id: int, hss_opt: h5py.File, params: dict) -> np.ndarray:
         return np.linalg.norm(coord_scaled - center_scaled, axis=1)
     # for experimental
     elif shape == 'experimental':
-        raise NotImplementedError('Experimental shape not implemented yet')
+        lad = _experimental_shape.compute_lad_from_experimental_shape(struct_id, coord, params)
+        max_lad = np.max(lad)
+        if max_lad <= 0:
+            return np.ones_like(lad)
+        norm_lad = lad / max_lad
+        return 1 - norm_lad
