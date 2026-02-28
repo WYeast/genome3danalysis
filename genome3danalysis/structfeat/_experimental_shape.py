@@ -11,10 +11,40 @@ except ImportError:
 
 def _resolve_shape_file(struct_id: int, params: dict) -> str:
     if 'exp_shape_file' in params:
-        return params['exp_shape_file'].format(struct_id=struct_id)
+        shape_file = params['exp_shape_file'].format(struct_id=struct_id)
+        if os.path.exists(shape_file):
+            return shape_file
+
+        # Backward-compatible fallbacks for nested per-structure directories,
+        # e.g. /.../lamina_bin/{struct_id}/lamina/lamina.bin
+        base, ext = os.path.splitext(shape_file)
+        candidates = []
+        if ext in ['.bin', '.mrc']:
+            candidates.append(os.path.join(base, 'lamina', f'lamina{ext}'))
+        else:
+            candidates.extend([
+                os.path.join(shape_file, 'lamina', 'lamina.bin'),
+                os.path.join(shape_file, 'lamina', 'lamina.mrc')
+            ])
+
+        for cand in candidates:
+            if os.path.exists(cand):
+                return cand
+
+        return shape_file
+
     if 'exp_shape_dir' in params:
         ext = params.get('exp_shape_ext', '.bin')
-        return os.path.join(params['exp_shape_dir'], f'{struct_id}{ext}')
+        default_file = os.path.join(params['exp_shape_dir'], f'{struct_id}{ext}')
+        if os.path.exists(default_file):
+            return default_file
+
+        nested_file = os.path.join(params['exp_shape_dir'], str(struct_id), 'lamina', f'lamina{ext}')
+        if os.path.exists(nested_file):
+            return nested_file
+
+        return default_file
+
     raise KeyError('Experimental shape requires exp_shape_file template or exp_shape_dir')
 
 
