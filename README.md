@@ -43,7 +43,7 @@ Body-specific cluster filtering:
 
 ### 3) Experimental nucleus shape for lamina/lamina_tsa
 
-`lamina` and `lamina_tsa` now support `shape="experimental"`, using per-structure
+`lamina`, `lamina_tsa`, and `radial` now support `shape="experimental"`, using per-structure
 shape maps from `.bin` or `.mrc`.
 
 Provide one of:
@@ -61,6 +61,17 @@ For experimental mode:
 
 - `lamina` outputs LAD as minimum distance to lamina surface (distance-transform approximation)
 - `lamina_tsa` outputs `exp(-tsa_exponent * LAD)`
+- `radial` outputs `1 - clip(LAD/R, 0, 1)` per structure, with `R` controlled by `exp_radial_mode`
+
+For shape path resolution, both flat and nested layouts are supported:
+
+- flat: `/path/lamina_bin/{struct_id}.bin`
+- nested: `/path/lamina_bin/{struct_id}/lamina/lamina.bin`
+
+
+`radial` experimental-mode options:
+
+- `exp_radial_mode`: `max_lad` (default, `R=max(LAD)`) or `half_longest_axis` (`R=0.5*longest_axis`)
 
 ### 4) gap_file supports boolean or cen/domain-style labels
 
