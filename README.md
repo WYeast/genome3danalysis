@@ -80,3 +80,101 @@ For shape path resolution, both flat and nested layouts are supported:
 - boolean-like: `True/False`, `1/0`, `yes/no`;
 - label-style: `domain`/`dom` are treated as non-gap, all other labels
   (e.g. `cen`, `tel`, `gap`, `contig`) are treated as gap.
+
+### 5) Control output `.sf.h5` filename and folder
+
+By default, `structfeat-run` writes output as:
+
+- `<hss_name with .hss replaced by .sf.h5>`
+
+You can override this in config:
+
+- `sf_name`: explicit output file path (highest priority)
+- `output_dir`: output folder used with auto-generated `<basename(hss_name)>.sf.h5`
+
+Example:
+
+```json
+{
+  "hss_name": "/path/to/input/model.hss",
+  "output_dir": ".",
+  "features": {
+    "radial": {
+      "shape": "experimental",
+      "exp_shape_file": "/path/to/lamina_bin/{struct_id}.bin"
+    }
+  }
+}
+```
+
+or
+
+```json
+{
+  "hss_name": "/path/to/input/model.hss",
+  "sf_name": "./my_custom_output.sf.h5",
+  "features": {
+    "lamina": {
+      "shape": "experimental",
+      "exp_shape_file": "/path/to/lamina_bin/{struct_id}.bin"
+    }
+  }
+}
+```
+
+## Understanding `.sf.h5` output content
+
+The output file is an HDF5 container with:
+
+- root-level metadata:
+  - `configuration` attribute: the full config used for the run.
+- root-level groups:
+  - `index` (saved from input HSS index)
+  - one group per extracted feature, e.g. `radial`, `lamina`, `icp`, ...
+
+For each feature group (e.g. `/radial`), datasets include:
+
+- `matrix`: per-structure values, shape `(n_bead, n_struct)`
+- `mean_arr`: haploid mean across structures
+- `std_arr`: haploid std across structures
+- `mean_arr_lnorm_gwide`: log2-normalized mean (genome-wide)
+- `mean_arr_lnorm_cwide`: log2-normalized mean (chromosome-wide)
+- `std_arr_lnorm_gwide`: log2-normalized std (genome-wide)
+- `std_arr_lnorm_cwide`: log2-normalized std (chromosome-wide)
+- optional `association_freq`: present when `contact_threshold` is provided for that feature
+
+### Python example: inspect and read with `h5py`
+
+```python
+import h5py
+
+sf_path = "./model.sf.h5"
+with h5py.File(sf_path, "r") as h5:
+    print("root keys:", list(h5.keys()))
+    print("config:\n", h5.attrs["configuration"])
+
+    feature = "radial"
+    print(f"datasets in /{feature}:", list(h5[feature].keys()))
+
+    mat = h5[f"{feature}/matrix"][:]  # (n_bead, n_struct)
+    mean_arr = h5[f"{feature}/mean_arr"][:]
+    print("matrix shape:", mat.shape)
+    print("mean shape:", mean_arr.shape)
+```
+
+### Python example: read via `SfFile`
+
+```python
+from genome3danalysis.structfeat import SfFile
+
+sf = SfFile("./model.sf.h5", "r")
+
+print("features:", sf.feature_list)
+for feat in sf.feature_list:
+    print(feat, sf.get_feature_dataset_list(feat))
+
+rad_matrix = sf.get_feature("radial", format="matrix")
+lam_mean = sf.get_feature("lamina", format="mean_arr")
+
+sf.close()
+```
