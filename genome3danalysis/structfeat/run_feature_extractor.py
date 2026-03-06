@@ -37,8 +37,23 @@ def main():
     # Get the hss file name from the configuration
     hss_name = config['hss_name']
 
-    # Initialize the SF file
-    sf_name = hss_name.replace('.hss', '.sf.h5')
+    # Resolve output SF file name
+    # Priority:
+    # 1) config['sf_name'] (explicit full path)
+    # 2) config['output_dir'] + basename(hss_name).replace('.hss', '.sf.h5')
+    # 3) default: hss_name.replace('.hss', '.sf.h5')
+    if 'sf_name' in config:
+        sf_name = config['sf_name']
+    else:
+        sf_basename = os.path.basename(hss_name).replace('.hss', '.sf.h5')
+        if 'output_dir' in config:
+            sf_name = os.path.join(config['output_dir'], sf_basename)
+        else:
+            sf_name = hss_name.replace('.hss', '.sf.h5')
+
+    sf_name = os.path.abspath(sf_name)
+    os.makedirs(os.path.dirname(sf_name), exist_ok=True)
+
     sf = SfFile(sf_name, 'w')
 
     # Run the SF file
