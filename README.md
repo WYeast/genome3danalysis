@@ -22,7 +22,35 @@ Example:
 }
 ```
 
-### 2) speckle/nucleoli with built-in MCL clustering
+### 2) ENHD (enhancer density) feature
+
+`enhd` computes, for each bead, the total enhancer counts carried by proximal beads
+(using enhancer-count BED input aligned by `chr/start/end`).
+
+Distance threshold is the same as `icp`:
+
+- `radius_factor`: center-to-center threshold as `N * (r_i + r_j)` (recommended), or
+- `dist_cutoff`: absolute surface-to-surface cutoff in nm (legacy fallback).
+
+Required parameter:
+
+- `enh_counts_file`: BED with per-domain/per-bead enhancer counts in the last column
+  (supports both 4-column and 5-column BED; missing beads are filled with 0).
+
+Example:
+
+```json
+{
+  "features": {
+    "enhd": {
+      "enh_counts_file": "/path/to/H1_Hi-Cv2.domains_100kb.unstimulated_1.counts.bed",
+      "radius_factor": 4
+    }
+  }
+}
+```
+
+### 3) speckle/nucleoli with built-in MCL clustering
 
 For `speckle`, `speckle_tsa`, `nucleoli`, `nucleoli_tsa`, you can set `use_mcl=true`
 to compute body clusters on the fly from tagged regions.
@@ -41,7 +69,7 @@ Body-specific cluster filtering:
 - speckle: `min_cluster_size` (default `5`)
 - nucleoli: `top_percentage` (default `95.0`), keep clusters with size >= percentile threshold
 
-### 3) Experimental nucleus shape for lamina/lamina_tsa
+### 4) Experimental nucleus shape for lamina/lamina_tsa
 
 `lamina`, `lamina_tsa`, and `radial` now support `shape="experimental"`, using per-structure
 shape maps from `.bin` or `.mrc`.
@@ -73,7 +101,7 @@ For shape path resolution, both flat and nested layouts are supported:
 
 - `exp_radial_mode`: `max_lad` (default, `R=max(LAD)`) or `half_longest_axis` (`R=0.5*longest_axis`)
 
-### 4) gap_file supports boolean or cen/domain-style labels
+### 5) gap_file supports boolean or cen/domain-style labels
 
 `gap_file` must be a 4-column BED (no header). The 4th column can be either:
 
@@ -81,7 +109,7 @@ For shape path resolution, both flat and nested layouts are supported:
 - label-style: `domain`/`dom` are treated as non-gap, all other labels
   (e.g. `cen`, `tel`, `gap`, `contig`) are treated as gap.
 
-### 5) Control output `.sf.h5` filename and folder
+### 6) Control output `.sf.h5` filename and folder
 
 By default, `structfeat-run` writes output as:
 
@@ -130,7 +158,7 @@ The output file is an HDF5 container with:
   - `configuration` attribute: the full config used for the run.
 - root-level groups:
   - `index` (saved from input HSS index)
-  - one group per extracted feature, e.g. `radial`, `lamina`, `icp`, ...
+  - one group per extracted feature, e.g. `radial`, `lamina`, `icp`, `enhd`, ...
 
 For each feature group (e.g. `/radial`), datasets include:
 
