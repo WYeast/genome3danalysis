@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 from alabtools.utils import Index
 import h5py
+from scipy.spatial import cKDTree
 
 DEFAULT_DIST_CUTOFF = 240  # nm
 DEFAULT_RADIUS_FACTOR = 4
@@ -66,19 +67,29 @@ def run(struct_id: int, hss_opt: h5py.File, params: dict) -> np.ndarray:
     radius_factor = params.get('radius_factor', DEFAULT_RADIUS_FACTOR)
 
     enhancer_counts = _load_enhancer_counts(index, params['enh_counts_file'])
+    tree = cKDTree(coord)
+    r_max = float(np.max(radii))
 
     enhd = np.zeros(len(index), dtype=float)
 
     for i in range(len(index)):
-        dists = np.linalg.norm(coord - coord[i], axis=1)
-
         if radius_factor is not None:
+            r_query = float(radius_factor * (radii[i] + r_max))
             dcap = radius_factor * (radii[i] + radii)
         else:
+            r_query = float(radii[i] + r_max + dist_sts_thresh)
             dcap = radii[i] + radii + dist_sts_thresh
 
-        prox_beads = np.where(dists < dcap)[0]
-        prox_beads = prox_beads[prox_beads != i]
+        cand = tree.query_ball_point(coord[i], r=r_query)
+        if len(cand) == 0:
+            continue
+        cand = np.asarray(cand, dtype=int)
+        cand = cand[cand != i]
+        if cand.size == 0:
+            continue
+
+        d = np.linalg.norm(coord[cand] - coord[i], axis=1)
+        prox_beads = cand[d < dcap[cand]]
 
         enhd[i] = np.sum(enhancer_counts[prox_beads])
 

@@ -63,6 +63,30 @@ Common MCL parameters:
   (if omitted, uses `2*(r_i+r_j)`)
 - `mcl_inflation`: MCL inflation, default `1.4`
 - `mcl_min_cluster_size`: MCL cluster floor, default `2`
+- `mcl_clusters_out`: optional dump path for all raw MCL clusters.
+  Two output modes are supported:
+  - **Single HDF5 mode** (recommended for many structures): if path ends with `.h5`,
+    all structures are written into one file under `/structures/{struct_id}`.
+  - **Per-structure NPZ mode**: for non-`.h5` paths, one file per structure is written.
+    Supports either a template path with `{struct_id}`,
+    e.g. `/path/mcl_clusters_struct{struct_id}.npz`,
+    or a base path where `_struct<id>.npz` is appended automatically.
+
+`mcl_clusters_out` stores, for each structure, all clusters before size filtering:
+
+- `cluster_bead_indices` (ragged object array): bead indices per cluster
+- `cluster_bead_coords` (ragged object array): per-cluster bead coordinates `(x,y,z)`
+- `cluster_sizes`: cluster sizes
+- `all_cluster_centroids`: centroids for all raw clusters
+- `kept_mask`: boolean mask indicating clusters kept after filtering
+- `kept_cluster_centroids`: centroids used by the feature computation
+
+For single-file HDF5 mode, each `/structures/{struct_id}` group stores:
+
+- `cluster_bead_indices_flat` + `cluster_bead_indices_offsets`
+- `cluster_bead_coords_flat` + `cluster_bead_coords_offsets`
+- `cluster_sizes`, `kept_mask`, `all_cluster_centroids`, `kept_cluster_centroids`
+- attrs: `struct_id`, `body_type`, `n_clusters_all`, `n_clusters_kept`
 
 Body-specific cluster filtering:
 
