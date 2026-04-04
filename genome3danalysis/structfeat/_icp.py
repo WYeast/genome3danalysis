@@ -102,7 +102,12 @@ def run(struct_id: int, hss_opt: h5py.File, params: dict) -> np.ndarray:
         prox_inter_beads = prox_beads[inter_mask]
         
         # GET INTER-CHROMOSOMAL CONTACT RATIO
-        inter_ratio[i] = len(prox_inter_beads) / len(prox_beads)
+        if len(prox_beads) == 0:
+            # No proximal neighbors under current threshold;
+            # ICP is undefined for this bead.
+            inter_ratio[i] = np.nan
+        else:
+            inter_ratio[i] = len(prox_inter_beads) / len(prox_beads)
         
         del prox_beads, chrom_prox_beads, copy_prox_beads, inter_mask, prox_inter_beads
     

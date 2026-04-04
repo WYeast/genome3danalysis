@@ -71,6 +71,12 @@ Common MCL parameters:
     Supports either a template path with `{struct_id}`,
     e.g. `/path/mcl_clusters_struct{struct_id}.npz`,
     or a base path where `_struct<id>.npz` is appended automatically.
+- `auto_regions_from_radial_top`: optional fallback ratio in `(0, 1]`.
+  If `regions_file/regions_label` are not provided, select the lowest `x` fraction
+  of beads by radial value (i.e. closest to nucleus center) as MCL seeds, restricted to `domain/dom` rows in
+  `gap_file` (thus excluding `cen` and other non-domain labels).
+  This mode requires `features.radial` to be configured; it reuses the exact
+  same radial settings (`shape`, ellipsoid/experimental params, etc.).
 
 `mcl_clusters_out` stores, for each structure, all clusters before size filtering:
 
@@ -92,6 +98,29 @@ Body-specific cluster filtering:
 
 - speckle: `min_cluster_size` (default `5`)
 - nucleoli: `top_percentage` (default `95.0`), keep clusters with size >= percentile threshold
+
+Priority rule for seed selection:
+
+- If `regions_file` + `regions_label` are both present, they are used.
+- Otherwise, if `auto_regions_from_radial_top` is present, fallback to radial-top seed selection.
+
+Example (fallback mode, lowest 10% radial in domain regions):
+
+```json
+{
+  "gap_file": "/path/H1_Hi-Cv2.domains_200kb.bed",
+  "features": {
+    "radial": {
+      "shape": "ellipsoid",
+      "radius": [5000, 5000, 5000]
+    },
+    "speckle": {
+      "use_mcl": true,
+      "auto_regions_from_radial_top": 0.1
+    }
+  }
+}
+```
 
 ### 4) Experimental nucleus shape for lamina/lamina_tsa
 

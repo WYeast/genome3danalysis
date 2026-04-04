@@ -2,6 +2,7 @@ import numpy as np
 import scipy.sparse as sp
 from alabtools.utils import Index
 from .. import utils
+from . import _radial
 import os
 import h5py
 import fcntl
@@ -23,6 +24,52 @@ def _load_haploid_labels_from_bed(filename: str, index: Index, default: str = 'N
         if key in label_map:
             hap_labels[i] = label_map[key]
     return hap_labels
+
+
+def _select_tagged_beads_from_radial_top(struct_id: int,
+                                         hss_opt,
+                                         params: dict,
+                                         index: Index) -> np.ndarray:
+    """Fallback selector: choose lowest-radial beads in domain regions.
+
+    Uses:
+      - params['auto_regions_from_radial_top'] as fraction in (0,1]
+      - params['gap_file'] with 4th-column labels where domain/dom are candidate regions
+      - params['_radial_params'] (injected from features.radial) to ensure identical radial mode
+    """
+    top_frac = float(params['auto_regions_from_radial_top'])
+    if not (0 < top_frac <= 1):
+        raise ValueError("auto_regions_from_radial_top must be in (0, 1].")
+
+    gap_file = params.get('gap_file', None)
+    if gap_file is None:
+        raise KeyError("auto_regions_from_radial_top requires gap_file in config.")
+
+    radial_params = params.get('_radial_params', None)
+    if radial_params is None:
+        raise KeyError("auto_regions_from_radial_top requires features.radial to be configured.")
+
+    # Re-read raw labels so we can keep only explicit domain/dom records.
+    _, _, _, labels = utils.read_bed(gap_file, val_type=str)
+    labels = np.asarray(labels).astype(str)
+    domain_tokens = {'domain', 'dom'}
+    domain_hap_mask = np.array([x.strip().lower() in domain_tokens for x in labels], dtype=bool)
+
+    domain_mtp_mask = utils.adapt_haploid_to_index(domain_hap_mask, index).astype(bool)
+    candidate_beads = np.where(domain_mtp_mask)[0]
+    if len(candidate_beads) == 0:
+        return np.array([], dtype=int)
+
+    radial = _radial.run(struct_id, hss_opt, radial_params)
+    radial_candidates = radial[candidate_beads]
+    n_pick = int(np.ceil(len(candidate_beads) * top_frac))
+    n_pick = max(1, min(n_pick, len(candidate_beads)))
+
+    # Lower radial means closer to nucleus center for both ellipsoid and
+    # experimental radial definitions used in this package.
+    order = np.argsort(radial_candidates)
+    picked = candidate_beads[order[:n_pick]]
+    return np.asarray(picked, dtype=int)
 
 
 def _cluster_beads_by_mcl(coords: np.ndarray,
@@ -195,12 +242,17 @@ def compute_mcl_cluster_coms(struct_id: int, hss_opt, params: dict, body_type: s
     coords = hss_opt['coordinates'][str(struct_id)][:]
     radii = hss_opt['radii'][:]
 
-    tag_bed = params['regions_file']
-    tag_name = params['regions_label']
-
-    hap_labels = _load_haploid_labels_from_bed(tag_bed, index)
-    labels_mtp = utils.adapt_haploid_to_index(hap_labels, index)
-    tagged_beads = np.where(labels_mtp == tag_name)[0]
+    has_region_tags = ('regions_file' in params and 'regions_label' in params)
+    if has_region_tags:
+        tag_bed = params['regions_file']
+        tag_name = params['regions_label']
+        hap_labels = _load_haploid_labels_from_bed(tag_bed, index)
+        labels_mtp = utils.adapt_haploid_to_index(hap_labels, index)
+        tagged_beads = np.where(labels_mtp == tag_name)[0]
+    elif 'auto_regions_from_radial_top' in params:
+        tagged_beads = _select_tagged_beads_from_radial_top(struct_id, hss_opt, params, index)
+    else:
+        raise KeyError("MCL requires either regions_file+regions_label or auto_regions_from_radial_top.")
 
     dist_thr = params.get('mcl_dist_threshold', None)
     mcl_inflation = float(params.get('mcl_inflation', 1.4))
