@@ -30,7 +30,7 @@ def _select_tagged_beads_from_radial_top(struct_id: int,
                                          hss_opt,
                                          params: dict,
                                          index: Index) -> np.ndarray:
-    """Fallback selector: choose top-radial beads in domain regions.
+    """Fallback selector: choose lowest-radial beads in domain regions.
 
     Uses:
       - params['auto_regions_from_radial_top'] as fraction in (0,1]
@@ -65,7 +65,9 @@ def _select_tagged_beads_from_radial_top(struct_id: int,
     n_pick = int(np.ceil(len(candidate_beads) * top_frac))
     n_pick = max(1, min(n_pick, len(candidate_beads)))
 
-    order = np.argsort(radial_candidates)[::-1]
+    # Lower radial means closer to nucleus center for both ellipsoid and
+    # experimental radial definitions used in this package.
+    order = np.argsort(radial_candidates)
     picked = candidate_beads[order[:n_pick]]
     return np.asarray(picked, dtype=int)
 

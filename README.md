@@ -72,8 +72,8 @@ Common MCL parameters:
     e.g. `/path/mcl_clusters_struct{struct_id}.npz`,
     or a base path where `_struct<id>.npz` is appended automatically.
 - `auto_regions_from_radial_top`: optional fallback ratio in `(0, 1]`.
-  If `regions_file/regions_label` are not provided, select the top `x` fraction
-  of beads by radial value as MCL seeds, restricted to `domain/dom` rows in
+  If `regions_file/regions_label` are not provided, select the lowest `x` fraction
+  of beads by radial value (i.e. closest to nucleus center) as MCL seeds, restricted to `domain/dom` rows in
   `gap_file` (thus excluding `cen` and other non-domain labels).
   This mode requires `features.radial` to be configured; it reuses the exact
   same radial settings (`shape`, ellipsoid/experimental params, etc.).
@@ -104,7 +104,7 @@ Priority rule for seed selection:
 - If `regions_file` + `regions_label` are both present, they are used.
 - Otherwise, if `auto_regions_from_radial_top` is present, fallback to radial-top seed selection.
 
-Example (fallback mode, top 10% radial in domain regions):
+Example (fallback mode, lowest 10% radial in domain regions):
 
 ```json
 {
