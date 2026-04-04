@@ -339,9 +339,18 @@ class SfFile(object):
         
         # get the feature parameters from the configuration
         try:
-            params = cfg['features'][feature]
+            params = dict(cfg['features'][feature])
         except KeyError:
             raise KeyError("No parameters found for feature {}.".format(feature))
+
+        # For speckle/nucleoli MCL fallback based on radial top fraction,
+        # pass radial feature params explicitly so both share identical radial mode.
+        if feature in ('speckle', 'speckle_tsa', 'nucleoli', 'nucleoli_tsa'):
+            radial_params = cfg.get('features', {}).get('radial', None)
+            if radial_params is not None:
+                params['_radial_params'] = dict(radial_params)
+            if 'gap_file' in cfg and 'gap_file' not in params:
+                params['gap_file'] = cfg['gap_file']
 
         # compute the feature array for the current structure
         feat_arr = structfeat_computation(feature, struct_id, hss_opt, params)
