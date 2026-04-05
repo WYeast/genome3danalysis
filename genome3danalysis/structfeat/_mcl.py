@@ -6,11 +6,17 @@ from . import _radial
 import os
 import h5py
 import fcntl
+import json
+import hashlib
+from scipy.spatial import cKDTree
 
 try:
     import markov_clustering as mc
 except ImportError:
     mc = None
+
+_TAGGED_BEADS_CACHE = {}
+_DOMAIN_CANDIDATE_CACHE = {}
 
 
 def _load_haploid_labels_from_bed(filename: str, index: Index, default: str = 'NA') -> np.ndarray:
@@ -49,14 +55,17 @@ def _select_tagged_beads_from_radial_top(struct_id: int,
     if radial_params is None:
         raise KeyError("auto_regions_from_radial_top requires features.radial to be configured.")
 
-    # Re-read raw labels so we can keep only explicit domain/dom records.
-    _, _, _, labels = utils.read_bed(gap_file, val_type=str)
-    labels = np.asarray(labels).astype(str)
-    domain_tokens = {'domain', 'dom'}
-    domain_hap_mask = np.array([x.strip().lower() in domain_tokens for x in labels], dtype=bool)
-
-    domain_mtp_mask = utils.adapt_haploid_to_index(domain_hap_mask, index).astype(bool)
-    candidate_beads = np.where(domain_mtp_mask)[0]
+    # Compute candidate domain beads once and reuse across structures.
+    cache_key = (os.path.abspath(str(gap_file)), len(index))
+    candidate_beads = _DOMAIN_CANDIDATE_CACHE.get(cache_key, None)
+    if candidate_beads is None:
+        _, _, _, labels = utils.read_bed(gap_file, val_type=str)
+        labels = np.asarray(labels).astype(str)
+        domain_tokens = {'domain', 'dom'}
+        domain_hap_mask = np.array([x.strip().lower() in domain_tokens for x in labels], dtype=bool)
+        domain_mtp_mask = utils.adapt_haploid_to_index(domain_hap_mask, index).astype(bool)
+        candidate_beads = np.where(domain_mtp_mask)[0]
+        _DOMAIN_CANDIDATE_CACHE[cache_key] = np.asarray(candidate_beads, dtype=int)
     if len(candidate_beads) == 0:
         return np.array([], dtype=int)
 
@@ -83,15 +92,40 @@ def _cluster_beads_by_mcl(coords: np.ndarray,
         raise ImportError('markov_clustering is required for MCL clustering features.')
 
     sub_xyz = coords[tagged_beads, :]
-    dists = np.linalg.norm(sub_xyz[:, None, :] - sub_xyz[None, :, :], axis=2)
+    sub_r = radii[tagged_beads].astype(float)
+    n = sub_xyz.shape[0]
 
-    if dist_threshold is None:
-        dcap = 2.0 * (radii[tagged_beads][:, None] + radii[tagged_beads][None, :])
-        adj = dists <= dcap
-    else:
-        adj = dists <= dist_threshold
+    tree = cKDTree(sub_xyz)
+    r_max = float(np.max(sub_r))
+    rows = []
+    cols = []
 
-    mat = sp.csr_matrix(adj.astype(np.int8))
+    for i in range(n):
+        if dist_threshold is None:
+            r_query = float(2.0 * (sub_r[i] + r_max))
+            cand = tree.query_ball_point(sub_xyz[i], r=r_query)
+            if len(cand) == 0:
+                rows.append(i)
+                cols.append(i)
+                continue
+            cand = np.asarray(cand, dtype=int)
+            d = np.linalg.norm(sub_xyz[cand] - sub_xyz[i], axis=1)
+            keep = d <= (2.0 * (sub_r[i] + sub_r[cand]))
+            neigh = cand[keep]
+        else:
+            neigh = np.asarray(tree.query_ball_point(sub_xyz[i], r=float(dist_threshold)), dtype=int)
+
+        if neigh.size == 0:
+            rows.append(i)
+            cols.append(i)
+        else:
+            rows.extend([i] * int(neigh.size))
+            cols.extend(neigh.tolist())
+
+    data = np.ones(len(rows), dtype=np.int8)
+    mat = sp.csr_matrix((data, (rows, cols)), shape=(n, n), dtype=np.int8)
+    mat = mat.maximum(mat.T)
+    mat.setdiag(1)
     result = mc.run_mcl(mat, inflation=inflation)
     clusters = mc.get_clusters(result)
 
@@ -246,9 +280,13 @@ def compute_mcl_cluster_coms(struct_id: int, hss_opt, params: dict, body_type: s
     if has_region_tags:
         tag_bed = params['regions_file']
         tag_name = params['regions_label']
-        hap_labels = _load_haploid_labels_from_bed(tag_bed, index)
-        labels_mtp = utils.adapt_haploid_to_index(hap_labels, index)
-        tagged_beads = np.where(labels_mtp == tag_name)[0]
+        cache_key = (os.path.abspath(str(tag_bed)), str(tag_name), len(index))
+        tagged_beads = _TAGGED_BEADS_CACHE.get(cache_key, None)
+        if tagged_beads is None:
+            hap_labels = _load_haploid_labels_from_bed(tag_bed, index)
+            labels_mtp = utils.adapt_haploid_to_index(hap_labels, index)
+            tagged_beads = np.where(labels_mtp == tag_name)[0]
+            _TAGGED_BEADS_CACHE[cache_key] = np.asarray(tagged_beads, dtype=int)
     elif 'auto_regions_from_radial_top' in params:
         tagged_beads = _select_tagged_beads_from_radial_top(struct_id, hss_opt, params, index)
     else:
@@ -257,6 +295,38 @@ def compute_mcl_cluster_coms(struct_id: int, hss_opt, params: dict, body_type: s
     dist_thr = params.get('mcl_dist_threshold', None)
     mcl_inflation = float(params.get('mcl_inflation', 1.4))
     mcl_min_cluster_size = int(params.get('mcl_min_cluster_size', 2))
+
+    # Optional cache: reuse MCL centroids across features (e.g. speckle + speckle_tsa).
+    cache_file = params.get('_mcl_cache_h5', None)
+    cache_signature = None
+    if cache_file is not None:
+        sig_obj = {
+            'body_type': body_type,
+            'regions_file': params.get('regions_file', None),
+            'regions_label': params.get('regions_label', None),
+            'auto_regions_from_radial_top': params.get('auto_regions_from_radial_top', None),
+            'gap_file': params.get('gap_file', None),
+            'radial_params': params.get('_radial_params', None),
+            'mcl_dist_threshold': params.get('mcl_dist_threshold', None),
+            'mcl_inflation': params.get('mcl_inflation', 1.4),
+            'mcl_min_cluster_size': params.get('mcl_min_cluster_size', 2),
+            'min_cluster_size': params.get('min_cluster_size', 5),
+            'top_percentage': params.get('top_percentage', 95.0)
+        }
+        sig_str = json.dumps(sig_obj, sort_keys=True, default=str)
+        cache_signature = hashlib.md5(sig_str.encode('utf-8')).hexdigest()
+        cache_file = os.path.abspath(str(cache_file))
+        if os.path.exists(cache_file):
+            lock_path = cache_file + '.lock'
+            with open(lock_path, 'a+') as lock_fp:
+                fcntl.flock(lock_fp.fileno(), fcntl.LOCK_SH)
+                with h5py.File(cache_file, 'r') as h5:
+                    path = f"mcl_centroids/{cache_signature}/{struct_id}"
+                    if path in h5:
+                        out = h5[path][:]
+                        fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
+                        return out
+                fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
 
     all_clusters = _cluster_beads_by_mcl(coords,
                                          radii,
@@ -307,5 +377,20 @@ def compute_mcl_cluster_coms(struct_id: int, hss_opt, params: dict, body_type: s
                                kept_mask,
                                all_centroids,
                                kept_centroids)
+
+    if cache_file is not None and cache_signature is not None:
+        cache_dir = os.path.dirname(cache_file)
+        if cache_dir:
+            os.makedirs(cache_dir, exist_ok=True)
+        lock_path = cache_file + '.lock'
+        with open(lock_path, 'w') as lock_fp:
+            fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
+            with h5py.File(cache_file, 'a') as h5:
+                grp = h5.require_group(f"mcl_centroids/{cache_signature}")
+                ds = str(struct_id)
+                if ds in grp:
+                    del grp[ds]
+                grp.create_dataset(ds, data=np.asarray(kept_centroids, dtype=np.float32), dtype=np.float32)
+            fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
 
     return kept_centroids

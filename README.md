@@ -54,6 +54,8 @@ Example:
 
 For `speckle`, `speckle_tsa`, `nucleoli`, `nucleoli_tsa`, you can set `use_mcl=true`
 to compute body clusters on the fly from tagged regions.
+MCL neighbor graph construction uses KDTree sparse queries (instead of dense all-pairs distance matrices)
+for better performance at high resolution.
 
 Common MCL parameters:
 
@@ -102,7 +104,11 @@ Body-specific cluster filtering:
 Priority rule for seed selection:
 
 - If `regions_file` + `regions_label` are both present, they are used.
-- Otherwise, if `auto_regions_from_radial_top` is present, fallback to radial-top seed selection.
+- Otherwise, if `auto_regions_from_radial_top` is present, fallback to lowest-radial seed selection.
+
+When multiple MCL-based features are requested in one run (e.g. `speckle` and `speckle_tsa`,
+or `nucleoli` and `nucleoli_tsa`), computed MCL centroids are cached and reused automatically
+within that run to avoid duplicate clustering.
 
 Example (fallback mode, lowest 10% radial in domain regions):
 
