@@ -210,6 +210,10 @@ class SfFile(object):
         utils.create_optimized_hss(hss_opt_name, hss, overwrite=True)  # saves the optimized HSS file
         # Add the name of the optimized HSS file to the configuration
         cfg['hss_opt_name'] = hss_opt_name
+        # Shared cache for MCL centroids across features (e.g. speckle and speckle_tsa).
+        cfg['_mcl_cache_h5'] = hss_opt_name + '.mcl_cache.h5'
+        if os.path.exists(cfg['_mcl_cache_h5']):
+            os.remove(cfg['_mcl_cache_h5'])
         # Close the original HSS file
         hss.close()
         sys.stdout.write("Optimized HSS file created\n")
@@ -222,6 +226,7 @@ class SfFile(object):
         
         # Remove the optimized HSS file
         os.system('rm -f {}'.format(hss_opt_name))
+        os.system('rm -f {}'.format(cfg['_mcl_cache_h5']))
         
         sys.stdout.write("All features extracted\n")
     
@@ -339,9 +344,20 @@ class SfFile(object):
         
         # get the feature parameters from the configuration
         try:
-            params = cfg['features'][feature]
+            params = dict(cfg['features'][feature])
         except KeyError:
             raise KeyError("No parameters found for feature {}.".format(feature))
+
+        # For speckle/nucleoli MCL fallback based on radial top fraction,
+        # pass radial feature params explicitly so both share identical radial mode.
+        if feature in ('speckle', 'speckle_tsa', 'nucleoli', 'nucleoli_tsa'):
+            radial_params = cfg.get('features', {}).get('radial', None)
+            if radial_params is not None:
+                params['_radial_params'] = dict(radial_params)
+            if 'gap_file' in cfg and 'gap_file' not in params:
+                params['gap_file'] = cfg['gap_file']
+            if '_mcl_cache_h5' in cfg:
+                params['_mcl_cache_h5'] = cfg['_mcl_cache_h5']
 
         # compute the feature array for the current structure
         feat_arr = structfeat_computation(feature, struct_id, hss_opt, params)
