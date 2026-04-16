@@ -50,6 +50,35 @@ Example:
 }
 ```
 
+### 2.5) transAB supports radius-factor threshold
+
+`transAB` can now use either:
+
+- `radius_factor`: center-to-center threshold as `N * (r_i + r_j)`, or
+- `dist_cutoff`: absolute surface-to-surface cutoff in nm (legacy behavior, default `500`).
+
+Priority rule:
+
+- If `radius_factor` is provided, it is used.
+- Otherwise `dist_cutoff` is used.
+
+Required parameter:
+
+- `filename`: BED with A/B compartment labels in the 4th column (`A`, `B`, optional `NA`)
+
+Example:
+
+```json
+{
+  "features": {
+    "transAB": {
+      "filename": "/path/to/HFF.compartment_200kb.updated.bed",
+      "radius_factor": 4
+    }
+  }
+}
+```
+
 ### 3) speckle/nucleoli with built-in MCL clustering
 
 For `speckle`, `speckle_tsa`, `nucleoli`, `nucleoli_tsa`, you can set `use_mcl=true`
