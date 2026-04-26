@@ -224,11 +224,15 @@ class SfFile(object):
 
             self.run_feature(cfg, feature)
         
+        # Final flush to ensure file is in a fully consistent state before
+        # any external operations (e.g. os.system fork) and process exit.
+        self.h5.flush()
+        
         # Remove the optimized HSS file
         os.system('rm -f {}'.format(hss_opt_name))
         os.system('rm -f {}'.format(cfg['_mcl_cache_h5']))
         
-        sys.stdout.write("All features extracted\n")
+        sys.stdout.write("All features extracted (final flush done)\n")
     
     def run_feature(self, cfg: dict, feature: str) -> None:
         """Extract a particular structural feature from an HSS file specified in the config file.
@@ -312,7 +316,12 @@ class SfFile(object):
         h5_group.create_dataset('std_arr_lnorm_gwide', data=feat_std_arr_lnorm_gwide)
         h5_group.create_dataset('std_arr_lnorm_cwide', data=feat_std_arr_lnorm_cwide)
         
-        sys.stdout.write("Bulk quantities added to the h5 file\n")
+        # Flush HDF5 buffer so this feature's data is durable on disk
+        # before the next feature starts writing. Without this, only the
+        # last-written features survive a process exit.
+        self.h5.flush()
+        
+        sys.stdout.write("Bulk quantities added to the h5 file (flushed)\n")
         
         # If a threshold is specified, compute the association frequency array
         if 'contact_threshold' in cfg['features'][feature]:
@@ -322,7 +331,9 @@ class SfFile(object):
             freq_arr, _ = self.compute_feature_mean_std(feature, threshold=cnt_thresh)
             # Add the association frequency array to feature group of the h5 file
             h5_group.create_dataset('association_freq', data=freq_arr)
-            sys.stdout.write("Association frequency added to the h5 file\n")
+            # Flush again to ensure association_freq is persisted
+            self.h5.flush()
+            sys.stdout.write("Association frequency added to the h5 file (flushed)\n")
             del freq_arr
         
         del feat_mat, feat_mean_arr, feat_std_arr, feat_mean_arr_lnorm_gwide, feat_mean_arr_lnorm_cwide, feat_std_arr_lnorm_gwide, feat_std_arr_lnorm_cwide
