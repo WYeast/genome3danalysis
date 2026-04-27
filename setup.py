@@ -24,6 +24,7 @@ setup(
         "scipy>=1.7.0",
         "markov_clustering>=0.0.6.dev0",
         "mrcfile>=1.4.3",
+        "typing_extensions>=4.0",
     ],
     entry_points={
         'console_scripts': [
