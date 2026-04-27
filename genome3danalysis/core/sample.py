@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+try:
+    from typing import Literal
+except ImportError:  # python<3.8
+    from typing_extensions import Literal
 
 import h5py
 import numpy as np
