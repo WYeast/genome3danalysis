@@ -53,6 +53,9 @@ plot_volcano(
     gate_threshold=0.05,
     delta_threshold=float(res["delta_cut"].iloc[0]),
     x_mode="delta",  # or "log2fc_mean"
+    gene_list=["NFKB1"],
+    gene_annotation_file="/u/project/xjzhou/wyeast/wy_data/Sohyeon_data/deep_seq/mcool_files/analysis/hg38.genes.chr.bed",
+    show=True,
     out_path="./results/volcano",
 )
 plot_sf_tracks(
