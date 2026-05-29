@@ -5,6 +5,9 @@ from scipy.spatial import cKDTree
 
 DEFAULT_DIST_CUTOFF = 240  # nm
 DEFAULT_RADIUS_FACTOR = 4
+DEFAULT_PHASED_INTRA = True  # backward-compatible default; treat each diploid
+                              # copy as a separate chromosome (a neighbor on the
+                              # other copy of the same chrom counts as inter).
 
 
 def _find_prox_beads(tree: cKDTree,
@@ -74,7 +77,8 @@ def run(struct_id: int, hss_opt: h5py.File, params: dict) -> np.ndarray:
     # d(i,j) <= radius_factor * (r_i + r_j)
     dist_sts_thresh = params.get('dist_cutoff', DEFAULT_DIST_CUTOFF)
     radius_factor = params.get('radius_factor', DEFAULT_RADIUS_FACTOR)
-    
+    phased_intra = params.get('phased_intra', DEFAULT_PHASED_INTRA)
+
     # initialize the inter-chromosomal contact ratio
     inter_ratio = np.zeros(len(index)).astype(float)
     
@@ -93,14 +97,19 @@ def run(struct_id: int, hss_opt: h5py.File, params: dict) -> np.ndarray:
                                       r_max)
         
         # FILTER INTER-CHROMOSOMAL FROM PROXIMAL BEADS
-        # Get the chromosome and copy of the proximal beads
+        # Get the chromosome (and copy, if phased) of the proximal beads
         chrom_prox_beads = index.chrom[prox_beads]
-        copy_prox_beads = index.copy[prox_beads]
-        # Get a mask that filters only the proximal beads that are inter-chromosomal (different chromosomes or different copies)
-        inter_mask = np.logical_or(chrom_prox_beads != index.chrom[i], copy_prox_beads != index.copy[i])
+        if phased_intra:
+            copy_prox_beads = index.copy[prox_beads]
+            # Inter = different chromosome OR same chromosome but different copy
+            inter_mask = np.logical_or(chrom_prox_beads != index.chrom[i],
+                                       copy_prox_beads != index.copy[i])
+        else:
+            # Inter = different chromosome only (both copies of same chrom are intra)
+            inter_mask = chrom_prox_beads != index.chrom[i]
         # Get the proximal beads that are inter-chromosomal
         prox_inter_beads = prox_beads[inter_mask]
-        
+
         # GET INTER-CHROMOSOMAL CONTACT RATIO
         if len(prox_beads) == 0:
             # No proximal neighbors under current threshold;
@@ -108,7 +117,7 @@ def run(struct_id: int, hss_opt: h5py.File, params: dict) -> np.ndarray:
             inter_ratio[i] = np.nan
         else:
             inter_ratio[i] = len(prox_inter_beads) / len(prox_beads)
-        
-        del prox_beads, chrom_prox_beads, copy_prox_beads, inter_mask, prox_inter_beads
+
+        del prox_beads, chrom_prox_beads, inter_mask, prox_inter_beads
     
     return inter_ratio
