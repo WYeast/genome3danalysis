@@ -18,11 +18,18 @@ from . import _transAB
 from . import _icp
 from . import _enhd
 from . import _rg
+from . import _cisratio
 
 # Available features that can be extracted
 AVAILABLE_FEATURES = ['radial', 'lamina', 'lamina_tsa',
-                      'speckle', 'nucleoli', 'speckle_tsa', 'nucleoli_tsa', 
-                      'transAB', 'icp', 'enhd', 'rg']
+                      'speckle', 'nucleoli', 'speckle_tsa', 'nucleoli_tsa',
+                      'transAB', 'icp', 'enhd', 'rg', 'cisratio']
+
+# Features whose kernel returns a dict {'intra_count', 'inter_count', 'ratio'}
+# instead of a 1D array. These use a sum-then-ratio haploid aggregation path
+# (sum diploid counts over homologous copies, then compute the ratio at the
+# haploid level, then mean/std/cv across structures).
+_COUNT_BASED_FEATURES = {'cisratio'}
 
 class SfFile(object):
     """Generic class for extracting and storing Structural Features from HSS file.
@@ -268,13 +275,23 @@ class SfFile(object):
                               feature=feature)
 
         # run the parallel and reduce tasks
-        # feat_mat is a matrix of shape (nbead_multiploid, nstruct)
-        feat_mat = controller.map_reduce(parallel_task,
-                                         reduce_task,
-                                         args=np.arange(hss.nstruct))
-        
+        # For 1D-array features, feat_result is a (nbead_multiploid, nstruct) matrix.
+        # For count-based features (cisratio), feat_result is a dict with keys
+        # 'matrix', 'intra_count_matrix', 'inter_count_matrix'.
+        feat_result = controller.map_reduce(parallel_task,
+                                            reduce_task,
+                                            args=np.arange(hss.nstruct))
+
         sys.stdout.write("Parallelization and reduction tasks completed.\n")
-        
+
+        is_count_based = feature in _COUNT_BASED_FEATURES
+        if is_count_based:
+            feat_mat = feat_result['matrix']
+            intra_mat = feat_result['intra_count_matrix']
+            inter_mat = feat_result['inter_count_matrix']
+        else:
+            feat_mat = feat_result
+
         # Mask the gaps (or "non-domain regions") with NaNs
         try:
             # Try to read the gap BED file from the config file.
@@ -291,38 +308,62 @@ class SfFile(object):
         gap_mtp = utils.adapt_haploid_to_index(gap_hap, self.index)
         # Mask the gaps
         feat_mat[gap_mtp, :] = np.nan
-        
+        if is_count_based:
+            intra_mat[gap_mtp, :] = np.nan
+            inter_mat[gap_mtp, :] = np.nan
+
         sys.stdout.write("Gaps masked\n")
 
         # delete the temporary directory
         os.system('rm -rf {}'.format(temp_dir))
-        
+
         # Set the feature matrix in the h5 file
         self.set_feature(feature, feat_mat)
-        
-        # Compute the HAPLOID bulk quantities (mean, std and log normalizations)
-        feat_mean_arr, feat_std_arr = self.compute_feature_mean_std(feature)
+        h5_group = self.h5[feature]
+        # For count-based features, persist the raw counts alongside the ratio.
+        if is_count_based:
+            h5_group.create_dataset('intra_count_matrix', data=intra_mat)
+            h5_group.create_dataset('inter_count_matrix', data=inter_mat)
+
+        # Compute the HAPLOID bulk quantities (mean, std, cv and log normalizations).
+        # cisratio uses sum-then-ratio at the haploid level (sum diploid intra/inter
+        # counts over homologous copies, then compute the ratio per structure, then
+        # mean/std/cv across structures). This matches the reference notebook
+        # `compute_varibility_from_mcl.ipynb` in the production analysis pipeline.
+        if is_count_based:
+            feat_mean_arr, feat_std_arr = self._compute_cisratio_haploid_stats(
+                intra_mat, inter_mat
+            )
+        else:
+            feat_mean_arr, feat_std_arr = self.compute_feature_mean_std(feature)
+
+        feat_cv_arr = self._safe_cv(feat_mean_arr, feat_std_arr)
+
         feat_mean_arr_lnorm_gwide = self.compute_log_normalization(feat_mean_arr, self.index, method='genome-wide')
         feat_mean_arr_lnorm_cwide = self.compute_log_normalization(feat_mean_arr, self.index, method='chromosome-wide')
         feat_std_arr_lnorm_gwide = self.compute_log_normalization(feat_std_arr, self.index, method='genome-wide')
         feat_std_arr_lnorm_cwide = self.compute_log_normalization(feat_std_arr, self.index, method='chromosome-wide')
-        
+        feat_cv_arr_lnorm_gwide = self.compute_log_normalization(feat_cv_arr, self.index, method='genome-wide')
+        feat_cv_arr_lnorm_cwide = self.compute_log_normalization(feat_cv_arr, self.index, method='chromosome-wide')
+
         # Add the bulk quantities to feature group of the h5 file
-        h5_group = self.h5[feature]
         h5_group.create_dataset('mean_arr', data=feat_mean_arr)
         h5_group.create_dataset('std_arr', data=feat_std_arr)
+        h5_group.create_dataset('cv_arr', data=feat_cv_arr)
         h5_group.create_dataset('mean_arr_lnorm_gwide', data=feat_mean_arr_lnorm_gwide)
         h5_group.create_dataset('mean_arr_lnorm_cwide', data=feat_mean_arr_lnorm_cwide)
         h5_group.create_dataset('std_arr_lnorm_gwide', data=feat_std_arr_lnorm_gwide)
         h5_group.create_dataset('std_arr_lnorm_cwide', data=feat_std_arr_lnorm_cwide)
-        
+        h5_group.create_dataset('cv_arr_lnorm_gwide', data=feat_cv_arr_lnorm_gwide)
+        h5_group.create_dataset('cv_arr_lnorm_cwide', data=feat_cv_arr_lnorm_cwide)
+
         # Flush HDF5 buffer so this feature's data is durable on disk
         # before the next feature starts writing. Without this, only the
         # last-written features survive a process exit.
         self.h5.flush()
-        
+
         sys.stdout.write("Bulk quantities added to the h5 file (flushed)\n")
-        
+
         # If a threshold is specified, compute the association frequency array
         if 'contact_threshold' in cfg['features'][feature]:
             # Compute the single-structure contact frequency matrix
@@ -335,10 +376,15 @@ class SfFile(object):
             self.h5.flush()
             sys.stdout.write("Association frequency added to the h5 file (flushed)\n")
             del freq_arr
-        
-        del feat_mat, feat_mean_arr, feat_std_arr, feat_mean_arr_lnorm_gwide, feat_mean_arr_lnorm_cwide, feat_std_arr_lnorm_gwide, feat_std_arr_lnorm_cwide
+
+        if is_count_based:
+            del intra_mat, inter_mat
+        del feat_mat, feat_mean_arr, feat_std_arr, feat_cv_arr
+        del feat_mean_arr_lnorm_gwide, feat_mean_arr_lnorm_cwide
+        del feat_std_arr_lnorm_gwide, feat_std_arr_lnorm_cwide
+        del feat_cv_arr_lnorm_gwide, feat_cv_arr_lnorm_cwide
         hss.close()
-        
+
         sys.stdout.write("Finished\n\n")
  
     @staticmethod
@@ -385,39 +431,57 @@ class SfFile(object):
     
     @staticmethod
     def reduce_feature(out_names, cfg, temp_dir, feature):
-        
+
         # get hss_name from cfg
         try:
             hss_name = cfg['hss_name']
         except KeyError:
             "hss_name not found in cfg."
-        
+
         # open hss file
         # again, we just need the number of beads and structures, so we don't need to open the optimized HSS file
         hss = HssFile(hss_name, 'r')
-        
+
         # check that the output size is correct
         assert len(out_names) == hss.nstruct,\
             "Number of output files does not match number of structures."
-        
-        # initialize the structure matrix and bulk arrays
+
+        # Count-based features (e.g. cisratio) return a dict per struct with
+        # 'intra_count', 'inter_count', and 'ratio'. We assemble three matrices.
+        if feature in _COUNT_BASED_FEATURES:
+            intra_mat = np.zeros((hss.nbead, hss.nstruct), dtype=np.float64)
+            inter_mat = np.zeros((hss.nbead, hss.nstruct), dtype=np.float64)
+            ratio_mat = np.zeros((hss.nbead, hss.nstruct), dtype=np.float64)
+            for structID in np.arange(hss.nstruct):
+                try:
+                    out_name = os.path.join(temp_dir, feature + '_' + str(structID))
+                    with open(out_name, 'rb') as file:
+                        feat_result = pickle.load(file)
+                except IOError:
+                    raise IOError("File {} not found.".format(out_name))
+                intra_mat[:, structID] = feat_result['intra_count']
+                inter_mat[:, structID] = feat_result['inter_count']
+                ratio_mat[:, structID] = feat_result['ratio']
+            hss.close()
+            return {
+                'matrix': ratio_mat,
+                'intra_count_matrix': intra_mat,
+                'inter_count_matrix': inter_mat,
+            }
+
+        # Standard 1D-array kernels.
         feat_mat = np.zeros((hss.nbead, hss.nstruct))
-        
-        # Loop over the structures
         for structID in np.arange(hss.nstruct):
-            # try to open the output file associated to structID
             try:
-                # Load the feature array from the pickle file
                 out_name = os.path.join(temp_dir, feature + '_' + str(structID))
                 with open(out_name, 'rb') as file:
                     feat_arr = pickle.load(file)
-                # Add the feature array to the matrix
                 feat_mat[:, structID] = feat_arr
             except IOError:
                 raise IOError("File {} not found.".format(out_name))
-        
+
         hss.close()
-        
+
         return feat_mat
     
     
@@ -466,6 +530,82 @@ class SfFile(object):
         feat_std_arr = np.array(feat_std_arr)
         
         return feat_mean_arr, feat_std_arr
+
+    @staticmethod
+    def _safe_cv(mean_arr: np.ndarray, std_arr: np.ndarray) -> np.ndarray:
+        """Compute the coefficient of variation cv = std / mean per haploid bead.
+
+        Bins where mean is zero or NaN return NaN so that downstream consumers
+        can distinguish "undefined" from a real cv of 0. Matches the convention
+        used by `compute_varibility_from_mcl.ipynb` in the production pipeline.
+        """
+        mean_arr = np.asarray(mean_arr, dtype=float)
+        std_arr = np.asarray(std_arr, dtype=float)
+        cv = np.full_like(mean_arr, np.nan, dtype=float)
+        mask = (mean_arr != 0) & ~np.isnan(mean_arr)
+        cv[mask] = std_arr[mask] / mean_arr[mask]
+        return cv
+
+    def _compute_cisratio_haploid_stats(self,
+                                        intra_mat: np.ndarray,
+                                        inter_mat: np.ndarray) -> tuple:
+        """Sum-then-ratio haploid aggregation for cisratio.
+
+        For each haploid locus k, sum the per-structure intra and inter neighbor
+        counts across all diploid copies, then compute cisratio at the haploid
+        level per structure, then reduce across structures.
+
+            intra_hap[k, s] = sum_{i in copies(k)}  intra_count[i, s]
+            inter_hap[k, s] = sum_{i in copies(k)}  inter_count[i, s]
+            cisratio[k, s]  = intra_hap[k, s] / (intra_hap[k, s] + inter_hap[k, s])
+            mean_arr[k]     = mean_s cisratio[k, s]
+            std_arr[k]      = std_s  cisratio[k, s]
+
+        NaN-aware: a copy entirely masked as gap (NaN) contributes 0 to the sum,
+        but if EVERY copy of a haploid locus is masked for a given structure,
+        the haploid count is set to NaN so the ratio (and its mean/std) are NaN.
+
+        Args:
+            intra_mat: (nbead_diploid, nstruct) intra-chromosomal neighbor counts,
+                NaN at gap positions.
+            inter_mat: (nbead_diploid, nstruct) inter-chromosomal neighbor counts,
+                NaN at gap positions.
+
+        Returns:
+            mean_arr: (nbead_haploid,) cross-structure mean of haploid cisratio.
+            std_arr:  (nbead_haploid,) cross-structure std of haploid cisratio.
+        """
+        copy_index = self.index.copy_index
+        nhap = len(copy_index)
+        nstruct = intra_mat.shape[1]
+
+        intra_hap = np.zeros((nhap, nstruct), dtype=float)
+        inter_hap = np.zeros((nhap, nstruct), dtype=float)
+
+        for hap_idx, dip_ids in copy_index.items():
+            # Normalize dip_ids to a list of ints.
+            if np.isscalar(dip_ids):
+                dip_ids = [int(dip_ids)]
+            else:
+                dip_ids = list(dip_ids)
+            intra_slice = intra_mat[dip_ids, :]
+            inter_slice = inter_mat[dip_ids, :]
+            intra_hap[hap_idx, :] = np.nansum(intra_slice, axis=0)
+            inter_hap[hap_idx, :] = np.nansum(inter_slice, axis=0)
+            # Mark struct positions where all copies are NaN (full gap).
+            all_nan = np.all(np.isnan(intra_slice), axis=0) \
+                & np.all(np.isnan(inter_slice), axis=0)
+            intra_hap[hap_idx, all_nan] = np.nan
+            inter_hap[hap_idx, all_nan] = np.nan
+
+        total_hap = intra_hap + inter_hap
+        cisratio_hap = np.full_like(intra_hap, np.nan, dtype=float)
+        valid = (total_hap > 0)
+        cisratio_hap[valid] = intra_hap[valid] / total_hap[valid]
+
+        mean_arr = np.nanmean(cisratio_hap, axis=1)
+        std_arr = np.nanstd(cisratio_hap, axis=1)
+        return mean_arr, std_arr
 
     @staticmethod
     def compute_log_normalization(arr: np.ndarray, index: Index, method: str = 'genome-wide') -> np.ndarray:
@@ -536,6 +676,8 @@ def structfeat_computation(feature, struct_id, hss_opt, params):
             return _enhd.run(struct_id, hss_opt, params)
         if feature == 'rg':
             return _rg.run(struct_id, hss_opt, params)
+        if feature == 'cisratio':
+            return _cisratio.run(struct_id, hss_opt, params)
 
 
 def read_configuration(cfg: object) -> dict:
