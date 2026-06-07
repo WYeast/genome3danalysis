@@ -30,14 +30,15 @@ def _resolve_colors(user_colors: dict | None) -> dict[str, str]:
     return out
 
 
-def _save_show(fig: plt.Figure, out_path: str | None) -> None:
+def _save_show(fig: plt.Figure, out_path: str | None, show: bool = True) -> None:
     if out_path:
         root, ext = os.path.splitext(out_path)
         base = root if ext.lower() in {".png", ".pdf"} else out_path
         os.makedirs(os.path.dirname(os.path.abspath(base)), exist_ok=True)
         fig.savefig(base + ".png", dpi=200, bbox_inches="tight")
         fig.savefig(base + ".pdf", dpi=200, bbox_inches="tight")
-    plt.show()
+    if show:
+        plt.show()
 
 
 def _load_cen(cen_file_path: str | None) -> pd.DataFrame:
@@ -60,6 +61,7 @@ def plot_sf_tracks(
     out_path: str | None = None,
     title: str | None = None,
     h5_dataset: str = "mean_arr",
+    show: bool = True,
 ):
     c = _resolve_colors(colors)
     value_col = feature_name if value_col is None else value_col
@@ -119,11 +121,11 @@ def plot_sf_tracks(
     if title:
         fig.suptitle(title)
     fig.tight_layout()
-    _save_show(fig, out_path)
+    _save_show(fig, out_path, show=show)
     return fig
 
 
-def plot_diff_tracks(df, chroms, value="delta", cen_file_path=None, colors=None, out_path=None, title=None):
+def plot_diff_tracks(df, chroms, value="delta", cen_file_path=None, colors=None, out_path=None, title=None, show=True):
     c = _resolve_colors(colors)
     fig, axes = plt.subplots(len(chroms), 1, figsize=(16, max(3.2 * len(chroms), 4)))
     if len(chroms) == 1:
@@ -157,11 +159,11 @@ def plot_diff_tracks(df, chroms, value="delta", cen_file_path=None, colors=None,
     if title:
         fig.suptitle(title)
     fig.tight_layout()
-    _save_show(fig, out_path)
+    _save_show(fig, out_path, show=show)
     return fig
 
 
-def plot_manhattan(df, gate_threshold=None, colors=None, out_path=None, title=None):
+def plot_manhattan(df, gate_threshold=None, colors=None, out_path=None, title=None, show=True):
     c = _resolve_colors(colors)
     data = df.copy()
     chroms = list(dict.fromkeys(data["chr"].tolist()))
@@ -191,34 +193,136 @@ def plot_manhattan(df, gate_threshold=None, colors=None, out_path=None, title=No
     if title:
         ax.set_title(title)
     fig.tight_layout()
-    _save_show(fig, out_path)
+    _save_show(fig, out_path, show=show)
     return fig
 
 
-def plot_volcano(df, gate_threshold=None, delta_threshold=None, colors=None, out_path=None, title=None):
+def plot_volcano(
+    df,
+    gate_threshold=None,
+    delta_threshold=None,
+    colors=None,
+    out_path=None,
+    title=None,
+    x_mode="delta",
+    gene_list=None,
+    gene_annotation_file=None,
+    gene_label_column="gene_name",
+    gene_pick_mode="min_pvalue",
+    show=True,
+):
+    """Plot volcano scatter for differential regions.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Differential result table.
+    gate_threshold : float | None, optional
+        P-value (or FDR) threshold to draw as horizontal dashed line.
+    delta_threshold : float | None, optional
+        Absolute x-threshold to draw as vertical dashed lines.
+    colors : dict | None, optional
+        Color overrides.
+    out_path : str | None, optional
+        Base output path; when set saves PNG/PDF and shows.
+    title : str | None, optional
+        Plot title.
+    x_mode : str, optional
+        X-axis mode:
+        - ``"delta"``: use ``df["delta"]`` directly.
+        - ``"log2fc_mean"``: use mean of available ``log2fc_*`` columns,
+          e.g. ``(log2fc_11 + log2fc_22)/2``.
+    """
     c = _resolve_colors(colors)
-    x = df["delta"].values
+
+    if x_mode == "delta":
+        x = df["delta"].values.astype(float)
+        x_label = "delta"
+    elif x_mode == "log2fc_mean":
+        fc_cols = sorted([col for col in df.columns if col.startswith("log2fc_")])
+        if not fc_cols:
+            raise ValueError(
+                "x_mode='log2fc_mean' requires at least one 'log2fc_*' column in df"
+            )
+        x = df[fc_cols].mean(axis=1).values.astype(float)
+        x_label = "mean log2 fold change"
+    else:
+        raise ValueError("x_mode must be one of {'delta', 'log2fc_mean'}")
+
+    def _pick_gene_rows(data: pd.DataFrame):
+        if not gene_list or not gene_annotation_file:
+            return []
+        if not os.path.exists(gene_annotation_file):
+            raise FileNotFoundError(f"Gene annotation file not found: {gene_annotation_file}")
+
+        ga = pd.read_csv(gene_annotation_file, sep="\t", comment="#", header=None)
+        if ga.shape[1] < 4:
+            raise ValueError("gene annotation file must contain at least 4 columns: chr,start,end,gene_name")
+        ga = ga.iloc[:, :6].copy()
+        cols = ["chr", "start", "end", gene_label_column, "gene_id", "strand"]
+        ga.columns = cols[: ga.shape[1]]
+        ga["start"] = ga["start"].astype(int)
+        ga["end"] = ga["end"].astype(int)
+
+        selected = []
+        for g in gene_list:
+            gsub = ga[ga[gene_label_column] == g]
+            if gsub.empty:
+                continue
+            best_row = None
+            best_p = None
+            for _, gr in gsub.iterrows():
+                ov = data[(data["chr"] == gr["chr"]) & (data["start"] < gr["end"]) & (data["end"] > gr["start"]) ]
+                if ov.empty:
+                    continue
+                if gene_pick_mode == "min_pvalue":
+                    cand = ov.loc[ov["pvalue"].idxmin()]
+                else:
+                    cand = ov.iloc[0]
+                pv = float(cand["pvalue"])
+                if best_row is None or pv < best_p:
+                    best_row = cand
+                    best_p = pv
+            if best_row is not None:
+                selected.append((g, best_row))
+        return selected
+
     y = -np.log10(np.clip(df["pvalue"].values.astype(float), 1e-300, 1.0))
     reg = df.get("regulation", pd.Series(["ns"] * len(df))).values
     cols = np.where(reg == "up", c["up"], np.where(reg == "down", c["down"], c["ns"]))
 
     fig, ax = plt.subplots(figsize=(7, 6))
     ax.scatter(x, y, c=cols, s=10, alpha=0.75)
+
+    gene_rows = _pick_gene_rows(df)
+    for i, (g, row) in enumerate(gene_rows):
+        gx = float(row["delta"]) if x_mode == "delta" else float(np.nanmean([row[c] for c in df.columns if c.startswith("log2fc_")]))
+        gy = -np.log10(max(float(row["pvalue"]), 1e-300))
+        ax.scatter([gx], [gy], c="black", s=20, zorder=4)
+        ax.annotate(
+            g,
+            xy=(gx, gy),
+            xytext=(gx + 0.02 * (1 if gx >= 0 else -1), gy + 0.5 + 0.2 * i),
+            textcoords="data",
+            arrowprops=dict(arrowstyle="-", color="black", lw=0.8),
+            fontsize=9,
+            ha="left" if gx >= 0 else "right",
+        )
     if delta_threshold is not None:
         ax.axvline(delta_threshold, color="black", linestyle="--")
         ax.axvline(-delta_threshold, color="black", linestyle="--")
     if gate_threshold is not None:
         ax.axhline(-np.log10(max(gate_threshold, 1e-300)), color="black", linestyle="--")
-    ax.set_xlabel("delta")
+    ax.set_xlabel(x_label)
     ax.set_ylabel("-log10(pvalue)")
     if title:
         ax.set_title(title)
     fig.tight_layout()
-    _save_show(fig, out_path)
+    _save_show(fig, out_path, show=show)
     return fig
 
 
-def plot_qq(df, md_mode="contrast", colors=None, out_path=None, title=None):
+def plot_qq(df, md_mode="contrast", colors=None, out_path=None, title=None, show=True):
     _ = _resolve_colors(colors)
     obs = np.sort(df["md2_used"].values.astype(float))
     n = len(obs)
@@ -243,11 +347,11 @@ def plot_qq(df, md_mode="contrast", colors=None, out_path=None, title=None):
     if title:
         ax.set_title(title)
     fig.tight_layout()
-    _save_show(fig, out_path)
+    _save_show(fig, out_path, show=show)
     return fig
 
 
-def plot_replicate_scatter(rep_data: dict, sample_name: str, colors=None, out_path=None):
+def plot_replicate_scatter(rep_data: dict, sample_name: str, colors=None, out_path=None, show=True):
     c = _resolve_colors(colors)
     keys = list(rep_data.keys())
     pairs = list(itertools.combinations(keys, 2))
@@ -255,7 +359,7 @@ def plot_replicate_scatter(rep_data: dict, sample_name: str, colors=None, out_pa
     if n == 0:
         fig, ax = plt.subplots(figsize=(4, 3))
         ax.set_title(f"{sample_name}: only one replicate")
-        _save_show(fig, out_path)
+        _save_show(fig, out_path, show=show)
         return fig
 
     ncols = min(3, n)
@@ -282,11 +386,11 @@ def plot_replicate_scatter(rep_data: dict, sample_name: str, colors=None, out_pa
 
     fig.suptitle(f"Replicate scatter: {sample_name}")
     fig.tight_layout()
-    _save_show(fig, out_path)
+    _save_show(fig, out_path, show=show)
     return fig
 
 
-def plot_md2_vs_delta(df, colors=None, out_path=None, title=None):
+def plot_md2_vs_delta(df, colors=None, out_path=None, title=None, show=True):
     c = _resolve_colors(colors)
     x = np.abs(df["delta"].values)
     y = df["md2_used"].values
@@ -302,17 +406,17 @@ def plot_md2_vs_delta(df, colors=None, out_path=None, title=None):
     if title:
         ax.set_title(title)
     fig.tight_layout()
-    _save_show(fig, out_path)
+    _save_show(fig, out_path, show=show)
     return fig
 
 
-def plot_sample_correlation(rep_data: dict, colors=None, out_path=None, title=None):
+def plot_sample_correlation(rep_data: dict, colors=None, out_path=None, title=None, show=True):
     _ = _resolve_colors(colors)
     keys = list(rep_data.keys())
     if not keys:
         fig, ax = plt.subplots(figsize=(4, 3))
         ax.set_title("No replicate data")
-        _save_show(fig, out_path)
+        _save_show(fig, out_path, show=show)
         return fig
 
     merged = None
@@ -337,11 +441,11 @@ def plot_sample_correlation(rep_data: dict, colors=None, out_path=None, title=No
     if title:
         ax.set_title(title)
     fig.tight_layout()
-    _save_show(fig, out_path)
+    _save_show(fig, out_path, show=show)
     return fig
 
 
-def plot_delta_histogram(df, bins=80, colors=None, out_path=None, title=None):
+def plot_delta_histogram(df, bins=80, colors=None, out_path=None, title=None, show=True):
     c = _resolve_colors(colors)
     d = df["delta"].values
     up = df[df.get("regulation", "ns") == "up"]["delta"].values
@@ -365,5 +469,5 @@ def plot_delta_histogram(df, bins=80, colors=None, out_path=None, title=None):
     if title:
         ax.set_title(title)
     fig.tight_layout()
-    _save_show(fig, out_path)
+    _save_show(fig, out_path, show=show)
     return fig
