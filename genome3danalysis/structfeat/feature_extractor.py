@@ -23,7 +23,7 @@ from . import _cisratio
 # Available features that can be extracted
 AVAILABLE_FEATURES = ['radial', 'lamina', 'lamina_tsa',
                       'speckle', 'nucleoli', 'speckle_tsa', 'nucleoli_tsa',
-                      'transAB', 'icp', 'enhd', 'rg', 'cisratio']
+                      'transAB', 'abratio', 'icp', 'enhd', 'rg', 'cisratio']
 
 # Features whose kernel returns a dict {'intra_count', 'inter_count', 'ratio'}
 # instead of a 1D array. These use a sum-then-ratio haploid aggregation path
@@ -670,6 +670,9 @@ def structfeat_computation(feature, struct_id, hss_opt, params):
             return _body.run(struct_id, hss_opt, params, what_to_measure='tsa', body_type='nucleoli')
         if feature == 'transAB':
             return _transAB.run(struct_id, hss_opt, params)
+        if feature == 'abratio':
+            # abratio = transAB kernel with include_intra=True (all neighbors)
+            return _transAB.run(struct_id, hss_opt, {**params, 'include_intra': True})
         if feature == 'icp':
             return _icp.run(struct_id, hss_opt, params)
         if feature == 'enhd':
