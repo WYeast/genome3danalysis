@@ -43,21 +43,37 @@ def _find_prox_beads(tree: cKDTree,
     return cand[keep]
 
 def run(struct_id: int, hss_opt: h5py.File, params: dict) -> np.ndarray:
-    """ Calculate the trans A/B ratio for each bead in the structure.
-    
-    Trans A/B ratio is defined as the ratio of the number of inter-chromosomal A beads within a distance threshold
-    divided by the number of inter-chromosomal B beads within the same distance threshold:
+    """ Calculate the A/B ratio for each bead in the structure.
+
+    By default (``include_intra=False``, the original ``transAB`` semantics):
         transAB[i] = N_trans_A[i] / (N_trans_A[i] + N_trans_B[i])
-        where N_trans_A[i] is the number of inter-chromosomal A beads within a distance threshold of bead i,
-        and N_trans_B[i] is the number of inter-chromosomal B beads within the same distance threshold of bead i.
+    where N_trans_{A,B}[i] count *inter-chromosomal* proximal neighbors of
+    bead i with the corresponding A/B label.
+
+    When ``include_intra=True`` (the ``abratio`` semantics, all neighbors):
+        abratio[i] = N_all_A[i] / (N_all_A[i] + N_all_B[i])
+    where N_all_{A,B}[i] count *all* proximal neighbors of bead i regardless
+    of chromosome / copy. The intra-chromosomal A/B-labelled neighbors are
+    pooled in alongside the trans ones; copies of bead i itself are still
+    excluded via the KDTree neighbor selection.
 
     Args:
         struct_id (int): The index of the structure in the HSS file.
-        hss_opt (h5py.File): The optimized HSS file, with coordinates of different structures in separate datasets.
-        params (dict): A dictionary containing the parameters for the analysis.
+        hss_opt (h5py.File): The optimized HSS file, with coordinates of
+            different structures in separate datasets.
+        params (dict): A dictionary of parameters. Supported keys:
+            - ``filename`` (str): A/B compartment BED (required).
+            - ``radius_factor`` (float): proximity threshold as multiple of
+              bead radii. If provided, takes priority over ``dist_cutoff``.
+            - ``dist_cutoff`` (float, nm): surface-to-surface distance
+              threshold when ``radius_factor`` is not used. Defaults to 500.
+            - ``include_intra`` (bool): when True, count all A/B-labelled
+              proximal neighbors (intra + inter). Defaults to False
+              (backward-compatible trans-only behavior).
 
     Returns:
-        (np.ndarray): The trans A/B ratio for each bead in the structure.
+        (np.ndarray): per-bead A/B ratio (n_intra+n_trans selection
+            depending on ``include_intra``).
     """
     
     # get the index
@@ -89,23 +105,29 @@ def run(struct_id: int, hss_opt: h5py.File, params: dict) -> np.ndarray:
     # Priority: radius_factor if provided; otherwise dist_cutoff.
     dist_sts_thresh = params.get('dist_cutoff', DEFAULT_DIST_CUTOFF)
     radius_factor = params.get('radius_factor', DEFAULT_RADIUS_FACTOR)
-    
+
+    # include_intra controls whether intra-chromosomal proximal beads are
+    # also counted toward N_A / N_B. False (default) preserves the original
+    # trans-only ``transAB`` semantics; True yields the all-neighbor
+    # ``abratio`` semantics.
+    include_intra = bool(params.get('include_intra', False))
+
     # get coordinates of struct_id
     coord = hss_opt['coordinates'][str(struct_id)][:]
-    
+
     # get the radii of the beads
     radii = hss_opt['radii'][:]
-    
-    # Initialize the transAB_ratio
-    transAB_ratio = np.zeros(len(index)).astype(float)
+
+    # Initialize the ratio array
+    ab_ratio = np.zeros(len(index)).astype(float)
 
     # Build KDTree once per structure for fast neighbor queries
     tree = cKDTree(coord)
     r_max = float(np.max(radii))
-    
+
     # Loop over all beads
     for i in range(len(index)):
-        
+
         # FIND PROXIMAL BEADS
         prox_beads = _find_prox_beads(tree,
                                       coord,
@@ -114,28 +136,29 @@ def run(struct_id: int, hss_opt: h5py.File, params: dict) -> np.ndarray:
                                       radius_factor,
                                       dist_sts_thresh,
                                       r_max)
-        
-        # FILTER INTER-CHROMOSOMAL FROM PROXIMAL BEADS
-        # Get the chromosome and copy of the proximal beads
-        chrom_prox_beads = index.chrom[prox_beads]
-        copy_prox_beads = index.copy[prox_beads]
-        # Get a mask that filters only the proximal beads that are inter-chromosomal (different chromosomes or different copies)
-        inter_mask = np.logical_or(chrom_prox_beads != index.chrom[i], copy_prox_beads != index.copy[i])
-        # Get the proximal beads that are inter-chromosomal
-        prox_inter_beads = prox_beads[inter_mask]
-        
-        # GET TRANSAB RATIO
-        # Get the A/B identity of the proximal inter-chromosomal beads
-        ab_prox_inter_beads = ab[prox_inter_beads]
-        # Get the TransAB ratio: n_trans(A) / (n_trans(A) + n_trans(B))
-        n_trans_A = np.sum(ab_prox_inter_beads == 'A')
-        n_trans_B = np.sum(ab_prox_inter_beads == 'B')
-        if (n_trans_A + n_trans_B) == 0:
-            # No inter-chromosomal neighbors with A/B label under current threshold.
-            transAB_ratio[i] = np.nan
-        else:
-            transAB_ratio[i] = n_trans_A / (n_trans_A + n_trans_B)
-        
-        del prox_beads, chrom_prox_beads, copy_prox_beads, inter_mask, prox_inter_beads, ab_prox_inter_beads
 
-    return transAB_ratio
+        if include_intra:
+            # All neighbors counted; no chromosome filter.
+            prox_ab_beads = prox_beads
+        else:
+            # Filter to inter-chromosomal neighbors only (different chrom OR copy).
+            chrom_prox_beads = index.chrom[prox_beads]
+            copy_prox_beads = index.copy[prox_beads]
+            inter_mask = np.logical_or(chrom_prox_beads != index.chrom[i],
+                                       copy_prox_beads != index.copy[i])
+            prox_ab_beads = prox_beads[inter_mask]
+            del chrom_prox_beads, copy_prox_beads, inter_mask
+
+        # COMPUTE A/B RATIO over the selected neighbors
+        ab_prox = ab[prox_ab_beads]
+        n_A = np.sum(ab_prox == 'A')
+        n_B = np.sum(ab_prox == 'B')
+        if (n_A + n_B) == 0:
+            # No A/B-labelled neighbors under current threshold/selection.
+            ab_ratio[i] = np.nan
+        else:
+            ab_ratio[i] = n_A / (n_A + n_B)
+
+        del prox_beads, prox_ab_beads, ab_prox
+
+    return ab_ratio
