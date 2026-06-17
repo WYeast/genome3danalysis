@@ -133,6 +133,36 @@ def _cluster_beads_by_mcl(coords: np.ndarray,
     return out
 
 
+def _cluster_distinct_chrom_counts(clusters: list, index: Index) -> np.ndarray:
+    """Count distinct chromosome strings represented in each cluster.
+
+    Chromosome copy is intentionally ignored: beads from chr1 copy A and
+    chr1 copy B both count as chr1.
+    """
+    if len(clusters) == 0:
+        return np.empty((0,), dtype=np.int32)
+
+    counts = []
+    for c in clusters:
+        chroms = np.asarray(index.chromstr[np.asarray(c, dtype=int)]).astype(str)
+        counts.append(len(np.unique(chroms)))
+    return np.asarray(counts, dtype=np.int32)
+
+
+def _filter_clusters_by_min_distinct_chroms(clusters: list,
+                                            index: Index,
+                                            min_distinct_chroms: int) -> list:
+    """Keep clusters represented by at least N distinct chromosome strings."""
+    min_distinct_chroms = int(min_distinct_chroms)
+    if min_distinct_chroms < 1:
+        raise ValueError("mcl_min_distinct_chroms must be >= 1.")
+    if min_distinct_chroms == 1 or len(clusters) == 0:
+        return clusters
+
+    counts = _cluster_distinct_chrom_counts(clusters, index)
+    return [c for c, n_chrom in zip(clusters, counts) if n_chrom >= min_distinct_chroms]
+
+
 def _clusters_to_centroids(coords: np.ndarray, radii: np.ndarray, clusters: list) -> np.ndarray:
     """Compute size-weighted cluster centroids.
 
@@ -174,7 +204,9 @@ def _save_cluster_dump(struct_id: int,
                        all_clusters: list,
                        kept_mask: np.ndarray,
                        all_centroids: np.ndarray,
-                       kept_centroids: np.ndarray) -> str:
+                       kept_centroids: np.ndarray,
+                       cluster_distinct_chrom_counts: np.ndarray,
+                       mcl_min_distinct_chroms: int) -> str:
     """Save all MCL clusters for one structure to compressed NPZ.
 
     Stored content includes all clusters before body-specific filtering.
@@ -196,6 +228,8 @@ def _save_cluster_dump(struct_id: int,
         cluster_bead_indices=all_idx_obj,
         cluster_bead_coords=all_xyz_obj,
         cluster_sizes=sizes,
+        cluster_distinct_chrom_counts=np.asarray(cluster_distinct_chrom_counts, dtype=np.int32),
+        mcl_min_distinct_chroms=np.int32(mcl_min_distinct_chroms),
         kept_mask=np.asarray(kept_mask, dtype=bool),
         all_cluster_centroids=np.asarray(all_centroids, dtype=np.float32),
         kept_cluster_centroids=np.asarray(kept_centroids, dtype=np.float32),
@@ -231,7 +265,9 @@ def _save_cluster_dump_h5(struct_id: int,
                           all_clusters: list,
                           kept_mask: np.ndarray,
                           all_centroids: np.ndarray,
-                          kept_centroids: np.ndarray) -> str:
+                          kept_centroids: np.ndarray,
+                          cluster_distinct_chrom_counts: np.ndarray,
+                          mcl_min_distinct_chroms: int) -> str:
     """Append/overwrite one structure's all-cluster dump into a single HDF5 file."""
     out_h5 = os.path.abspath(out_h5)
     out_dir = os.path.dirname(out_h5)
@@ -258,6 +294,9 @@ def _save_cluster_dump_h5(struct_id: int,
             grp.create_dataset('cluster_bead_coords_flat', data=xyz_flat, dtype=xyz_flat.dtype)
             grp.create_dataset('cluster_bead_coords_offsets', data=xyz_offsets, dtype=xyz_offsets.dtype)
             grp.create_dataset('cluster_sizes', data=sizes, dtype=sizes.dtype)
+            grp.create_dataset('cluster_distinct_chrom_counts',
+                               data=np.asarray(cluster_distinct_chrom_counts, dtype=np.int32),
+                               dtype=np.int32)
             grp.create_dataset('kept_mask', data=np.asarray(kept_mask, dtype=bool), dtype=bool)
             grp.create_dataset('all_cluster_centroids', data=np.asarray(all_centroids, dtype=np.float32), dtype=np.float32)
             grp.create_dataset('kept_cluster_centroids', data=np.asarray(kept_centroids, dtype=np.float32), dtype=np.float32)
@@ -266,6 +305,7 @@ def _save_cluster_dump_h5(struct_id: int,
             grp.attrs['body_type'] = str(body_type)
             grp.attrs['n_clusters_all'] = int(len(all_clusters))
             grp.attrs['n_clusters_kept'] = int(np.sum(np.asarray(kept_mask, dtype=bool)))
+            grp.attrs['mcl_min_distinct_chroms'] = int(mcl_min_distinct_chroms)
 
         fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
     return out_h5
@@ -295,6 +335,9 @@ def compute_mcl_cluster_coms(struct_id: int, hss_opt, params: dict, body_type: s
     dist_thr = params.get('mcl_dist_threshold', None)
     mcl_inflation = float(params.get('mcl_inflation', 1.4))
     mcl_min_cluster_size = int(params.get('mcl_min_cluster_size', 2))
+    mcl_min_distinct_chroms = int(params.get('mcl_min_distinct_chroms', 1))
+    if mcl_min_distinct_chroms < 1:
+        raise ValueError("mcl_min_distinct_chroms must be >= 1.")
 
     # Optional cache: reuse MCL centroids across features (e.g. speckle + speckle_tsa).
     cache_file = params.get('_mcl_cache_h5', None)
@@ -310,6 +353,7 @@ def compute_mcl_cluster_coms(struct_id: int, hss_opt, params: dict, body_type: s
             'mcl_dist_threshold': params.get('mcl_dist_threshold', None),
             'mcl_inflation': params.get('mcl_inflation', 1.4),
             'mcl_min_cluster_size': params.get('mcl_min_cluster_size', 2),
+            'mcl_min_distinct_chroms': params.get('mcl_min_distinct_chroms', 1),
             'min_cluster_size': params.get('min_cluster_size', 5),
             'top_percentage': params.get('top_percentage', 95.0)
         }
@@ -336,6 +380,7 @@ def compute_mcl_cluster_coms(struct_id: int, hss_opt, params: dict, body_type: s
 
     # First-stage common MCL filtering
     clusters = [c for c in all_clusters if len(c) >= mcl_min_cluster_size]
+    clusters = _filter_clusters_by_min_distinct_chroms(clusters, index, mcl_min_distinct_chroms)
 
     if body_type == 'speckle':
         min_size = int(params.get('min_cluster_size', 5))
@@ -352,6 +397,8 @@ def compute_mcl_cluster_coms(struct_id: int, hss_opt, params: dict, body_type: s
     all_centroids = _clusters_to_centroids(coords, radii, all_clusters)
     kept_centroids = _clusters_to_centroids(coords, radii, clusters)
 
+    cluster_distinct_chrom_counts = _cluster_distinct_chrom_counts(all_clusters, index)
+
     # Optional cluster dump output.
     # This dump always includes ALL clusters (before size filtering),
     # plus kept_mask and kept centroids to support downstream selection.
@@ -367,7 +414,9 @@ def compute_mcl_cluster_coms(struct_id: int, hss_opt, params: dict, body_type: s
                                   all_clusters,
                                   kept_mask,
                                   all_centroids,
-                                  kept_centroids)
+                                  kept_centroids,
+                                  cluster_distinct_chrom_counts,
+                                  mcl_min_distinct_chroms)
         else:
             _save_cluster_dump(struct_id,
                                out_base,
@@ -376,7 +425,9 @@ def compute_mcl_cluster_coms(struct_id: int, hss_opt, params: dict, body_type: s
                                all_clusters,
                                kept_mask,
                                all_centroids,
-                               kept_centroids)
+                               kept_centroids,
+                               cluster_distinct_chrom_counts,
+                               mcl_min_distinct_chroms)
 
     if cache_file is not None and cache_signature is not None:
         cache_dir = os.path.dirname(cache_file)

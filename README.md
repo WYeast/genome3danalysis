@@ -94,6 +94,8 @@ Common MCL parameters:
   (if omitted, uses `2*(r_i+r_j)`)
 - `mcl_inflation`: MCL inflation, default `1.4`
 - `mcl_min_cluster_size`: MCL cluster floor, default `2`
+- `mcl_min_distinct_chroms`: minimum number of distinct chromosome strings represented in each kept MCL cluster, default `1`.
+  Copy is ignored for this count, so `chr1` copy A and `chr1` copy B both count as `chr1`; use `2` to require an inter-chromosomal cluster.
 - `mcl_clusters_out`: optional dump path for all raw MCL clusters.
   Two output modes are supported:
   - **Single HDF5 mode** (recommended for many structures): if path ends with `.h5`,
@@ -114,6 +116,8 @@ Common MCL parameters:
 - `cluster_bead_indices` (ragged object array): bead indices per cluster
 - `cluster_bead_coords` (ragged object array): per-cluster bead coordinates `(x,y,z)`
 - `cluster_sizes`: cluster sizes
+- `cluster_distinct_chrom_counts`: number of distinct chromosome strings in each raw cluster
+- `mcl_min_distinct_chroms`: configured distinct-chromosome threshold
 - `all_cluster_centroids`: centroids for all raw clusters
 - `kept_mask`: boolean mask indicating clusters kept after filtering
 - `kept_cluster_centroids`: centroids used by the feature computation
@@ -122,8 +126,14 @@ For single-file HDF5 mode, each `/structures/{struct_id}` group stores:
 
 - `cluster_bead_indices_flat` + `cluster_bead_indices_offsets`
 - `cluster_bead_coords_flat` + `cluster_bead_coords_offsets`
-- `cluster_sizes`, `kept_mask`, `all_cluster_centroids`, `kept_cluster_centroids`
-- attrs: `struct_id`, `body_type`, `n_clusters_all`, `n_clusters_kept`
+- `cluster_sizes`, `cluster_distinct_chrom_counts`, `kept_mask`, `all_cluster_centroids`, `kept_cluster_centroids`
+- attrs: `struct_id`, `body_type`, `n_clusters_all`, `n_clusters_kept`, `mcl_min_distinct_chroms`
+
+Cluster filtering order:
+
+- common MCL floor: `mcl_min_cluster_size`
+- common chromosome-diversity filter: `mcl_min_distinct_chroms`
+- body-specific filters listed below
 
 Body-specific cluster filtering:
 
@@ -151,7 +161,8 @@ Example (fallback mode, lowest 10% radial in domain regions):
     },
     "speckle": {
       "use_mcl": true,
-      "auto_regions_from_radial_top": 0.1
+      "auto_regions_from_radial_top": 0.1,
+      "mcl_min_distinct_chroms": 2
     }
   }
 }
